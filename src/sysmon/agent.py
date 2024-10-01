@@ -30,10 +30,11 @@ from os import R_OK, access, path, walk
 import psutil
 from gevent import sleep
 from volttron import utils
+from volttron.client.logs import setup_logging
 from volttron.client.vip.agent import RPC, Agent
 from volttron.utils.scheduling import periodic
 
-utils.setup_logging()
+setup_logging()
 _log = logging.getLogger(__name__)
 __version__ = '4.0'
 
@@ -209,15 +210,16 @@ class SysMonAgent(Agent):
         sleep(1)    # Wait for a second to pass to avoid divide by zero errors from tracking variables.
         for method in self.IMPLEMENTED_METHODS:
             item = monitors.pop(method, None)
-            if method == 'path_usage_rate' and item.get('path_name', None):
-                # Set initial value(s) of self.last_path_sizes for any configured path names.
-                self.path_usage_rate(item.get('path_name'))
-            if item and item.pop('poll', None) is True:
-                item_publish_type = item.get('publish_type', None)
-                item_publish_type = 'record' if method in self.RECORD_ONLY_PUBLISH_METHODS else item_publish_type
-                item_publish_type = item_publish_type if item_publish_type else self.default_publish_type
-                self._periodic_pub(getattr(self, method), item_publish_type, item['check_interval'], item['point_name'],
-                                   item['params'])
+            if item:
+                if method == 'path_usage_rate' and item.get('path_name', None):
+                    # Set initial value(s) of self.last_path_sizes for any configured path names.
+                    self.path_usage_rate(item.get('path_name'))
+                if item and item.pop('poll', None) is True:
+                    item_publish_type = item.get('publish_type', None)
+                    item_publish_type = 'record' if method in self.RECORD_ONLY_PUBLISH_METHODS else item_publish_type
+                    item_publish_type = item_publish_type if item_publish_type else self.default_publish_type
+                    self._periodic_pub(getattr(self, method), item_publish_type, item['check_interval'], item['point_name'],
+                                       item['params'])
 
         for key in contents:
             _log.warning('Ignoring unrecognized configuration parameter %s', key)
