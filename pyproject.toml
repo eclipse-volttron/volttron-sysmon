@@ -12,7 +12,7 @@ profile = "black"
 include = ["src/sysmon", "sysmonagent.config"]
 
 name = "volttron-sysmon"
-version = "1.0.0"
+version = "2.0.0rc0"
 description = ""
 authors = ["VOLTTRON Team <volttron@pnnl.gov>"]
 license = "Apache License 2.0"
@@ -35,7 +35,7 @@ python = ">=3.10,<4.0"
 volttron-core = ">=2.0.0rc0"
 
 [tool.poetry.group.dev.dependencies]
-volttron-testing = "^0.4.0rc0"
+#volttron-testing = "^0.4.0rc0"
 pytest = "^6.2.5"
 pytest-cov = "^3.0.0"
 mock = "^4.0.3"
