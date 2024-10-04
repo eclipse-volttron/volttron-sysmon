@@ -4,16 +4,13 @@ The System Monitoring Agent (colloquially “SysMon”) can be installed on the 
 including but not limited to percent CPU utilization, percent system memory (RAM) utilization, and percent storage (disk) utilization based
 on disk path.
 
-## Requires
+## Pre-requisite
 
-* python >= 3.10
-* volttron >= 10.0
-
-## Installation
-
-Before installing, VOLTTRON should be installed and running.  Its virtual environment should be active.
+Before installing this agent, VOLTTRON (>=11.0.0rc0) should be installed and running.  Its virtual environment should be active.
 Information on how to install of the VOLTTRON platform can be found
 [here](https://github.com/eclipse-volttron/volttron-core).
+
+## Installation
 
 Create a directory called `config` and use the change directory command to enter it.
 
