@@ -1,5 +1,5 @@
 [build-system]
-requires = ["poetry-core>=1.2.2"]
+requires = ["poetry-core>=2.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
@@ -9,10 +9,14 @@ volttron-sysmon = "sysmon.agent:main"
 profile = "black"
 
 [tool.poetry]
-include = ["src/sysmon", "sysmonagent.config"]
+include = [
+    { path = "volttron-sysmon-default-vip-id", format = ["sdist", "wheel"] },
+    { path = "IDENTITY", format = ["sdist", "wheel"] },
+    { path = "sysmon_agent_config.json", format = ["sdist", "wheel"] }
+]
 
 name = "volttron-sysmon"
-version = "0.1.0"
+version = "2.0.0rc0"
 description = ""
 authors = ["VOLTTRON Team <volttron@pnnl.gov>"]
 license = "Apache-2.0"
@@ -32,7 +36,7 @@ classifiers = [
 
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
-volttron = "^10.0.4rc1"
+volttron-core = ">=2.0.0rc0"
 
 [tool.poetry.group.dev.dependencies]
 volttron-testing = "^0.4.0rc0"

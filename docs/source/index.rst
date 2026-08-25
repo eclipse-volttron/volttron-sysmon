@@ -261,7 +261,7 @@ For simplicity, copy all of the JSON from below and switch the key ``"poll": fal
                 }
             },
             "network_interface_statistics": {
-                "point_name": "Network/Interface/Addresses",
+                "point_name": "Network/Interface/Statistics",
                 "check_interval": 5,
                 "poll": false,
                 "params": {

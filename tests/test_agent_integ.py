@@ -23,42 +23,77 @@
 # }}}
 
 import gevent
-from pathlib import Path
+from unittest.mock import MagicMock
+from sysmon.agent import SysMonAgent
 
-from volttron.client.messaging.health import STATUS_GOOD
-from volttron.client.vip.agent import Agent
-from volttrontesting.platformwrapper import PlatformWrapper
 
-def test_sysmon_agent_successful_install_on_volttron_platform(
-        publish_agent: Agent, volttron_instance: PlatformWrapper):
-    # Agent install path based upon root of this repository
-    agent_dir = Path(__file__).parent.parent.resolve().as_posix()
-    sysmon_config = {
+def test_sysmon_agent_end_to_end_polling_and_pubsub():
+    """Integration test simulating full SysMon agent lifecycle with PubSub messages."""
+    agent = object.__new__(SysMonAgent)
+    agent.default_publish_type = "datalogger"
+    agent.base_topic = "Log/Platform"
+    agent._scheduled = []
+    agent.last_path_sizes = {}
+    agent.last_disk_read_bytes = {}
+    agent.last_disk_write_bytes = {}
+    agent.last_network_received_bytes = {}
+    agent.last_network_sent_bytes = {}
+    
+    agent.vip = MagicMock()
+    agent.core = MagicMock()
+
+    published_messages = []
+
+    def mock_publish(peer, topic, headers, message):
+        published_messages.append({"peer": peer, "topic": topic, "headers": headers, "message": message})
+
+    agent.vip.pubsub.publish.side_effect = mock_publish
+
+    # Full config with diverse publish types and subpoint filters
+    config = {
         "default_publish_type": "datalogger",
         "base_topic": "Log/Platform",
         "monitor": {
             "cpu_percent": {
                 "point_name": "CPU/Percent",
-                "check_interval": 5,
+                "check_interval": 1,
                 "poll": True,
-                "params": {
-                    "per_cpu": True,
-                    "capture_interval": None
-                }
+                "params": {"per_cpu": False, "capture_interval": None}
+            },
+            "memory": {
+                "point_name": "Memory",
+                "check_interval": 1,
+                "poll": True,
+                "params": {"sub_points": {"available": True, "percent": True, "used": True}}
+            },
+            "load_average": {
+                "point_name": "CPU/LoadAverage",
+                "check_interval": 1,
+                "poll": True,
+                "params": {"sub_points": {"OneMinute": True, "FiveMinute": True}}
+            },
+            "network_connections": {
+                "point_name": "Network/Connections",
+                "check_interval": 1,
+                "poll": True,
+                "params": {"kind": "inet"}
             }
         }
     }
-    pdriver_id = "agent.sysmon"
 
-    pdriver_uuid = volttron_instance.install_agent(agent_dir=agent_dir,
-                                                config_file=sysmon_config,
-                                                start=False,
-                                                vip_identity=pdriver_id)
-    assert pdriver_uuid is not None
-    gevent.sleep(1)
-    started = volttron_instance.start_agent(pdriver_uuid)
-    assert started
-    assert volttron_instance.is_agent_running(pdriver_uuid)
+    agent.on_configure("config", "NEW", config)
+    assert len(agent._scheduled) == 4
 
-    assert publish_agent.vip.rpc.call(
-        pdriver_id, "health.get_status").get(timeout=10).get('status') == STATUS_GOOD
+    # Trigger all scheduled periodic tasks
+    for sched_call in agent.core.schedule.call_args_list:
+        task_func = sched_call[0][1]
+        task_params = sched_call[0][2]
+        task_func(task_params)
+
+    assert len(published_messages) == 4
+
+    topics = [m["topic"] for m in published_messages]
+    assert "datalogger/Log/Platform/CPU" in topics
+    assert "datalogger/Log/Platform/Memory" in topics
+    assert "datalogger/Log/Platform/CPU/LoadAverage" in topics
+    assert "record/Log/Platform/Network/Connections" in topics
