@@ -33,7 +33,12 @@ from volttron import utils
 from volttron.client.vip.agent import RPC, Agent
 from volttron.utils.scheduling import periodic
 
-utils.setup_logging()
+try:
+    from volttron.client.logs import setup_logging
+except ImportError:
+    setup_logging = getattr(utils, 'setup_logging', lambda: None)
+
+setup_logging()
 _log = logging.getLogger(__name__)
 __version__ = '4.0'
 
@@ -47,14 +52,15 @@ class SysMonAgent(Agent):
     :type config: dict
     """
 
-    IMPLEMENTED_METHODS = ('cpu_percent', 'cpu_times', 'cpu_times_percent', 'cpu_statistics', 'cpu_frequency',
-                           'cpu_count', 'load_average', 'memory', 'memory_percent', 'swap', 'disk_partitions',
-                           'disk_usage', 'disk_percent', 'disk_io', 'path_usage', 'path_usage_rate', 'network_io',
-                           'network_connections', 'network_interface_addresses', 'network_interface_statistics',
-                           'sensors_temperatures', 'sensors_fans', 'sensors_battery', 'boot_time', 'users')
+    IMPLEMENTED_METHODS = ('cpu_percent', 'cpu_times', 'cpu_times_percent', 'cpu_statistics', 'cpu_stats',
+                           'cpu_frequency', 'cpu_count', 'load_average', 'memory', 'memory_percent', 'swap',
+                           'disk_partitions', 'disk_usage', 'disk_percent', 'disk_io', 'path_usage',
+                           'path_usage_rate', 'network_io', 'network_connections', 'network_interface_addresses',
+                           'network_interface_address', 'network_interface_statistics', 'sensors_temperatures',
+                           'sensors_fans', 'sensors_battery', 'boot_time', 'users')
 
-    RECORD_ONLY_PUBLISH_METHODS = ('disk_partitions', 'network_connections', 'network_interface_address',
-                                   'sensors_temperatures', 'users')
+    RECORD_ONLY_PUBLISH_METHODS = ('disk_partitions', 'network_connections', 'network_interface_addresses',
+                                   'network_interface_address', 'sensors_temperatures', 'users')
 
     UNITS = {
         'boot_time': 's',
@@ -62,6 +68,7 @@ class SysMonAgent(Agent):
         'cpu_frequency': 'MHz',
         'cpu_percent': 'percent',
         'cpu_stats': 'count',
+        'cpu_statistics': 'count',
         'cpu_times': 's',
         'cpu_times_percent': 'percent',
         'disk_io': {
@@ -101,7 +108,14 @@ class SysMonAgent(Agent):
         },
         'memory_percent': 'percent',
         'network_connections': None,
+        'network_interface_addresses': None,
         'network_interface_address': None,
+        'network_interface_statistics': {
+            'isup': 'bool',
+            'duplex': 'enum',
+            'speed': 'Mbps',
+            'mtu': 'bytes'
+        },
         'network_interface_statitics': {
             'isup': 'bool',
             'duplex': 'enum',
@@ -209,9 +223,11 @@ class SysMonAgent(Agent):
         sleep(1)    # Wait for a second to pass to avoid divide by zero errors from tracking variables.
         for method in self.IMPLEMENTED_METHODS:
             item = monitors.pop(method, None)
-            if method == 'path_usage_rate' and item.get('path_name', None):
-                # Set initial value(s) of self.last_path_sizes for any configured path names.
-                self.path_usage_rate(item.get('path_name'))
+            if method == 'path_usage_rate' and item:
+                path_name = item.get('path_name') or item.get('params', {}).get('path_name')
+                if path_name:
+                    # Set initial value(s) of self.last_path_sizes for any configured path names.
+                    self.path_usage_rate(path_name)
             if item and item.pop('poll', None) is True:
                 item_publish_type = item.get('publish_type', None)
                 item_publish_type = 'record' if method in self.RECORD_ONLY_PUBLISH_METHODS else item_publish_type
@@ -249,14 +265,17 @@ class SysMonAgent(Agent):
             tz = now.tzname()
             now = utils.format_timestamp(now)
             entries = _unpack(point_name, data, now)
+            if not entries:
+                return
             point_base = path.dirname(path.commonprefix(list(entries.keys())))
             entries = {path.relpath(topic, point_base): value for topic, value in entries.items()}
             message = {}
             header = {'Date': now}
             for k, v in entries.items():
                 message[k] = {'Readings': [v.now, v.value], 'Units': v.units, 'tz': tz, 'data_type': v.data_type}
+            topic = '/'.join(filter(None, [publish_type, self.base_topic, point_base]))
             self.vip.pubsub.publish(peer='pubsub',
-                                    topic=publish_type + '/' + self.base_topic + '/' + point_base,
+                                    topic=topic,
                                     headers=header,
                                     message=message)
 
@@ -264,23 +283,26 @@ class SysMonAgent(Agent):
             data = func(**parameters)
             now = utils.format_timestamp(utils.get_aware_utc_now())
             entries = _unpack(point_name, data, now)
+            if not entries:
+                return
             point_base = path.dirname(path.commonprefix(list(entries.keys())))
             entries = {path.relpath(topic, point_base): value for topic, value in entries.items()}
             val, meta = {}, {}
             for k, v in entries.items():
-                val[k] = v
+                val[k] = v.value
                 meta[k] = {'Units': v.units, 'data_type': v.data_type}
             message = [val, meta]
             header = {'Date': now}
-            topic = publish_type + '/' + self.base_topic + '/' + point_base + '/all'
+            topic = '/'.join(filter(None, [publish_type, self.base_topic, point_base, 'all']))
             self.vip.pubsub.publish(peer='pubsub', topic=topic, headers=header, message=message)
 
         def _record_publish(parameters):
             data = func(**parameters)
             now = utils.format_timestamp(utils.get_aware_utc_now())
             header = {'Date': now}
+            topic = '/'.join(filter(None, [publish_type, self.base_topic, point_name]))
             self.vip.pubsub.publish(peer='pubsub',
-                                    topic=publish_type + '/' + self.base_topic + '/' + point_name,
+                                    topic=topic,
                                     headers=header,
                                     message=data)
 
@@ -328,6 +350,11 @@ class SysMonAgent(Agent):
         stats = psutil.cpu_stats()
         stats = self._process_statistics(stats, sub_points=sub_points)
         return stats
+
+    @RPC.export('cpu_statistics')
+    def cpu_statistics(self, sub_points=None):
+        """Return various CPU statistics."""
+        return self.cpu_stats(sub_points=sub_points)
 
     @RPC.export('cpu_frequency')
     def cpu_frequency(self, per_cpu=False, sub_points=None):
@@ -422,8 +449,8 @@ class SysMonAgent(Agent):
             if current_usage > 0:    # Don't use or store error codes as a usage value.
                 current_path_sizes[path_n] = {'value': current_usage, 'dt': now}
                 if path_n in self.last_path_sizes:
-                    rates[path_n] = (current_usage - self.last_path_sizes[path_n]['value']) \
-                                    / (now - self.last_path_sizes[path_n]['dt']).seconds
+                    dt = (now - self.last_path_sizes[path_n]['dt']).total_seconds()
+                    rates[path_n] = (current_usage - self.last_path_sizes[path_n]['value']) / dt if dt > 0 else 0.0
                 else:
                     rates[
                         path_n] = -2    # Error code -2 indicates no prior tracking data. Call again for valid response.
@@ -487,6 +514,11 @@ class SysMonAgent(Agent):
         addresses = self._format_return(addresses)
         return addresses
 
+    @RPC.export('network_interface_address')
+    def network_interface_address(self, included_interfaces=None, sub_points=None):
+        """Alias for network_interface_addresses."""
+        return self.network_interface_addresses(included_interfaces=included_interfaces, sub_points=sub_points)
+
     @RPC.export('network_interface_statistics')
     def network_interface_statistics(self, included_interfaces=None, sub_points=None):
         """Return information about each network interface."""
@@ -499,7 +531,7 @@ class SysMonAgent(Agent):
         return stats
 
     @RPC.export('sensors_temperatures')
-    def sensors_temperatures(self, fahrenheit=False):
+    def sensors_temperatures(self, fahrenheit=False, included_sensors=None, sub_points=None):
         """Return hardware temperatures."""
         temps = psutil.sensors_temperatures(fahrenheit=fahrenheit)
         
@@ -508,6 +540,8 @@ class SysMonAgent(Agent):
 
         formatted_temps = {}
         for sensor_type, readings in temps.items():
+            if included_sensors and sensor_type not in included_sensors:
+                continue
             formatted_readings = []
             for reading in readings:
                 # Use the sensor label if available, otherwise, use the sensor type as the label
@@ -516,13 +550,22 @@ class SysMonAgent(Agent):
                 unit = 'F' if fahrenheit else 'C'
                 current_temperature = f"{reading.current}°{unit}"
 
-                formatted_readings.append({
+                reading_dict = {
                     'label': label,
                     'current': current_temperature,
-                })
-            formatted_temps[sensor_type] = formatted_readings
+                    'high': reading.high,
+                    'critical': reading.critical,
+                }
+                if sub_points:
+                    if isinstance(sub_points, list):
+                        reading_dict = {k: v for k, v in reading_dict.items() if k in sub_points}
+                    elif isinstance(sub_points, dict):
+                        reading_dict = {k: v for k, v in reading_dict.items() if sub_points.get(k, False) is True}
+                formatted_readings.append(reading_dict)
+            if formatted_readings:
+                formatted_temps[sensor_type] = formatted_readings
 
-        return formatted_temps
+        return formatted_temps if formatted_temps else "No hardware to read"
 
 
     @RPC.export('sensors_fans')
@@ -617,7 +660,8 @@ class SysMonAgent(Agent):
 
         for device, in_bytes in current_in_bytes.items():
             if device in last_in:
-                throughput = (in_bytes['value'] - last_in[device]['value']) / (now - last_in[device]['dt']).seconds
+                elapsed = (now - last_in[device]['dt']).total_seconds()
+                throughput = (in_bytes['value'] - last_in[device]['value']) / elapsed if elapsed > 0 else 0.0
             else:
                 throughput = -2
             if not sub_points or in_ret_label in sub_points:
@@ -628,7 +672,8 @@ class SysMonAgent(Agent):
         last_in.update(current_in_bytes)
         for device, out_bytes in current_out_bytes.items():
             if device in last_out:
-                throughput = (out_bytes['value'] - last_out[device]['value']) / (now - last_out[device]['dt']).seconds
+                elapsed = (now - last_out[device]['dt']).total_seconds()
+                throughput = (out_bytes['value'] - last_out[device]['value']) / elapsed if elapsed > 0 else 0.0
             else:
                 throughput = -2
             if not sub_points or out_ret_label in sub_points:

@@ -261,7 +261,7 @@ For simplicity, copy all of the JSON below and switch the key `"poll": false,` t
             }
         },
         "network_interface_statistics": {
-            "point_name": "Network/Interface/Addresses",
+            "point_name": "Network/Interface/Statistics",
             "check_interval": 5,
             "poll": false,
             "params": {
@@ -338,16 +338,16 @@ For simplicity, copy all of the JSON below and switch the key `"poll": false,` t
 
 ```
 
-Besides `poll`, there are four other important options in sysmons configuration.
+Besides `poll`, there are four other important options in SysMon's configuration:
 
-- `default_publish_type` only needs to be specified once in the configuration, this is the default publish type.
-- `base_topic` also only needs to be specified once. This is the base topic.
-- `point_name` changes the point name for the specific system monitor. In combination with publish_type and base_topic our data for cpu_precent would be published to volttron with a topic of: **datalogger/Log/Platform/CPU/Percent** using the below json as an example.
-- `check_interval` adjusts the time in seconds to poll for new system data. This can be modified for each system resource.
+- `default_publish_type`: Specifies the default publish type (`datalogger`, `all`, or `record`).
+- `base_topic`: Specifies the base topic (e.g., `Log/Platform`).
+- `point_name`: Sets the topic suffix for the specific monitor. In combination with `default_publish_type` and `base_topic`, data for `cpu_percent` is published to VOLTTRON with a topic of **datalogger/Log/Platform/CPU/Percent**.
+- `check_interval`: Adjusts the polling interval in seconds for that resource.
 
-The Sysmon agent serves as a wrapper for psutil. You can adjust resource specific options by adjusting false to true in the configuration file. For detailed insights into these options and their impact, you can read the [psutil documentation](https://psutil.readthedocs.io/en/latest/)
+The SysMon agent serves as a configurable wrapper around `psutil`. You can enable or disable specific sub-metrics by setting boolean values in the configuration file. For detailed insights into each metric, consult the [psutil documentation](https://psutil.readthedocs.io/en/latest/).
 
-You may also delete any unused fields if desired. For example, a configuration to monitor just cpu_precent could look like this.
+Unused monitor sections may be deleted. For example, a minimal configuration to monitor only `cpu_percent` looks like:
 
 ```json
 {
@@ -357,9 +357,9 @@ You may also delete any unused fields if desired. For example, a configuration t
         "cpu_percent": {
             "point_name": "CPU/Percent",
             "check_interval": 5,
-            "poll": false,
+            "poll": true,
             "params": {
-                "per_cpu": true,
+                "per_cpu": false,
                 "capture_interval": null
             }
         }
@@ -367,47 +367,52 @@ You may also delete any unused fields if desired. For example, a configuration t
 }
 ```
 
-Install and start the sysmon agent
+### Install and start the SysMon Agent
+
+Install and start the agent (it automatically uses the default VIP identity `platform.sysmon`):
 
 ```bash
-vctl install volttron-sysmon --vip-identity agent.sysmon --start
+vctl install volttron-sysmon --start
 ```
 
-Add `sysmon_agent_config.json` to the configuration store
+*(Optional: you can supply a custom VIP identity using `--vip-identity <identity>`)*.
+
+### Store Configuration in the Configuration Store
+
+Add `sysmon_agent_config.json` to the agent's configuration store under the key `config`:
 
 ```bash
-vctl config store agent.sysmon config sysmon_agent_config.json
+vctl config store platform.sysmon config sysmon_agent_config.json
 ```
 
-Observe Data
+> **Note:** The second argument `config` is required as `SysMonAgent` listens for configuration events on the `config` key name.
 
-To see data being published to the bus, install a [Listener Agent](https://pypi.org/project/volttron-listener/):
+### Observe Data
+
+To verify telemetry being published to the bus, install and start a [Listener Agent](https://pypi.org/project/volttron-listener/):
 
 ```bash
 vctl install volttron-listener --start
 ```
 
-Periodic Publish
+### Periodic Publish
 
-At the interval specified by the configuration option for each resource, the agent will automatically query the system
-for the resource utilization statistics and publish it to the message bus using the topic as previously described.  The
-message content for each publish will contain only a single numeric value for that specific topic.  Currently,
-“scrape_all” style publishes are not supported.
+At the interval specified by the configuration option for each resource, the agent queries the system and publishes metrics to the message bus under the configured topic.
 
-The following is an example of the LoadAverage publish captured by the Listener agent in the VOLTTRON log:
+Example of a `LoadAverage` publish captured by the Listener agent in the VOLTTRON log:
 
 ```log
-2024-01-02 12:03:50,435 (volttron-listener-0.2.0rc0 2404) listener.agent(104) INFO: Peer: pubsub, Sender: volttron-sysmon-0.1.0_1:, Bus: , Topic: datalogger/Log/Platform/CPU/LoadAverage, Headers: {'Date': '2024-01-02T20:03:50.426814+00:00', 'min_compatible_version': '3.0', 'max_compatible_version': ''}, Message:
-{'FifteenMinute': {'Readings': ['2024-01-02T20:03:50.426814+00:00',
+2026-08-25 12:03:50,435 (volttron-listener-2.0.0rc3) listener.agent INFO: Peer: pubsub, Sender: platform.sysmon:, Bus: , Topic: datalogger/Log/Platform/CPU/LoadAverage, Headers: {'Date': '2026-08-25T17:03:50.426814+00:00', 'min_compatible_version': '3.0', 'max_compatible_version': ''}, Message:
+{'FifteenMinute': {'Readings': ['2026-08-25T17:03:50.426814+00:00',
                                 0.009765625],
                    'Units': 'load_average',
                    'data_type': 'float',
                    'tz': 'UTC'},
- 'FiveMinute': {'Readings': ['2024-01-02T20:03:50.426814+00:00', 0.05517578125],
+ 'FiveMinute': {'Readings': ['2026-08-25T17:03:50.426814+00:00', 0.05517578125],
                 'Units': 'load_average',
                 'data_type': 'float',
                 'tz': 'UTC'},
- 'OneMinute': {'Readings': ['2024-01-02T20:03:50.426814+00:00', 0.14404296875],
+ 'OneMinute': {'Readings': ['2026-08-25T17:03:50.426814+00:00', 0.14404296875],
                'Units': 'load_average',
                'data_type': 'float',
                'tz': 'UTC'}}
