@@ -494,12 +494,12 @@ class SysMonAgent(Agent):
             if 'type' in v:
                 v['type'] = v['type'].name
             if 'laddr' in v:
-                v['laddr'] = v['laddr'].ip + ':' + str(v['laddr'].port) \
-                    if type(v['laddr']) is psutil._common.addr else ''
+                laddr = v['laddr']
+                v['laddr'] = f"{laddr.ip}:{laddr.port}" if hasattr(laddr, 'ip') and hasattr(laddr, 'port') else ''
             if 'raddr' in v:
-                v['raddr'] = v['raddr'].ip + ':' + str(v['raddr'].port) \
-                    if type(v['raddr']) is psutil._common.addr else ''
-        connections = self._format_return(connections)
+                raddr = v['raddr']
+                v['raddr'] = f"{raddr.ip}:{raddr.port}" if hasattr(raddr, 'ip') and hasattr(raddr, 'port') else ''
+            connections = self._format_return(connections)
         return connections
 
     @RPC.export('network_interface_addresses')

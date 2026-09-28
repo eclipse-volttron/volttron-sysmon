@@ -28,6 +28,10 @@ import sys
 from pathlib import Path
 import pytest
 
+from gevent import monkey
+if not monkey.is_module_patched("subprocess"):
+    monkey.patch_subprocess()
+
 if "src" not in sys.path:
     sys.path.insert(0, "src")
 
