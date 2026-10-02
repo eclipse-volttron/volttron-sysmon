@@ -5,9 +5,9 @@
         "cpu_percent": {
             "point_name": "CPU/Percent",
             "check_interval": 5,
-            "poll": false,
+            "poll": true,
             "params": {
-                "per_cpu": true,
+                "per_cpu": false,
                 "capture_interval": null
             }
         },
@@ -80,7 +80,7 @@
         "memory": {
             "point_name": "Memory",
             "check_interval": 5,
-            "poll": false,
+            "poll": true,
             "params": {
                 "sub_points": {
                     "total": false,
@@ -232,7 +232,7 @@
             }
         },
         "network_interface_statistics": {
-            "point_name": "Network/Interface/Addresses",
+            "point_name": "Network/Interface/Statistics",
             "check_interval": 5,
             "poll": false,
             "params": {

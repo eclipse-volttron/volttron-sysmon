@@ -25,15 +25,21 @@
 import logging
 import sys
 from collections import namedtuple
+from enum import Enum
 from os import R_OK, access, path, walk
 
 import psutil
 from gevent import sleep
 from volttron import utils
-from volttron.client.vip.agent import RPC, Agent
+from volttron.client.vip.agent import RPC, Agent, Core
 from volttron.utils.scheduling import periodic
 
-utils.setup_logging()
+try:
+    from volttron.client.logs import setup_logging
+except ImportError:
+    setup_logging = getattr(utils, 'setup_logging', lambda: None)
+
+setup_logging()
 _log = logging.getLogger(__name__)
 __version__ = '4.0'
 
@@ -47,14 +53,15 @@ class SysMonAgent(Agent):
     :type config: dict
     """
 
-    IMPLEMENTED_METHODS = ('cpu_percent', 'cpu_times', 'cpu_times_percent', 'cpu_statistics', 'cpu_frequency',
-                           'cpu_count', 'load_average', 'memory', 'memory_percent', 'swap', 'disk_partitions',
-                           'disk_usage', 'disk_percent', 'disk_io', 'path_usage', 'path_usage_rate', 'network_io',
-                           'network_connections', 'network_interface_addresses', 'network_interface_statistics',
-                           'sensors_temperatures', 'sensors_fans', 'sensors_battery', 'boot_time', 'users')
+    IMPLEMENTED_METHODS = ('cpu_percent', 'cpu_times', 'cpu_times_percent', 'cpu_statistics', 'cpu_stats',
+                           'cpu_frequency', 'cpu_count', 'load_average', 'memory', 'memory_percent', 'swap',
+                           'disk_partitions', 'disk_usage', 'disk_percent', 'disk_io', 'path_usage',
+                           'path_usage_rate', 'network_io', 'network_connections', 'network_interface_addresses',
+                           'network_interface_address', 'network_interface_statistics', 'sensors_temperatures',
+                           'sensors_fans', 'sensors_battery', 'boot_time', 'users')
 
-    RECORD_ONLY_PUBLISH_METHODS = ('disk_partitions', 'network_connections', 'network_interface_address',
-                                   'sensors_temperatures', 'users')
+    RECORD_ONLY_PUBLISH_METHODS = ('disk_partitions', 'network_connections', 'network_interface_addresses',
+                                   'network_interface_address', 'sensors_temperatures', 'users')
 
     UNITS = {
         'boot_time': 's',
@@ -62,6 +69,7 @@ class SysMonAgent(Agent):
         'cpu_frequency': 'MHz',
         'cpu_percent': 'percent',
         'cpu_stats': 'count',
+        'cpu_statistics': 'count',
         'cpu_times': 's',
         'cpu_times_percent': 'percent',
         'disk_io': {
@@ -101,8 +109,9 @@ class SysMonAgent(Agent):
         },
         'memory_percent': 'percent',
         'network_connections': None,
+        'network_interface_addresses': None,
         'network_interface_address': None,
-        'network_interface_statitics': {
+        'network_interface_statistics': {
             'isup': 'bool',
             'duplex': 'enum',
             'speed': 'Mbps',
@@ -133,7 +142,7 @@ class SysMonAgent(Agent):
             'total': 'bytes',
             'used': 'bytes',
             'free': 'bytes',
-            'percent': 'bytes',
+            'percent': 'percent',
             'sin': 'bytes',
             'sout': 'bytes'
         },
@@ -166,6 +175,10 @@ class SysMonAgent(Agent):
         self.vip.config.set_default('config', default_config)
         self.vip.config.subscribe(self.on_configure, actions=['NEW', 'UPDATE'], pattern='config')
 
+    @Core.receiver('onstart')
+    def onstart(self, sender, **kwargs):
+        self.vip.heartbeat.start()
+
     def on_configure(self, config_name, action, contents):
         _log.info(f'Received configuration store event of type: {action}. Loading configuration from config://{config_name}')
 
@@ -186,61 +199,85 @@ class SysMonAgent(Agent):
                          'See SysMonAgent/README.md for information on new configuration format.')
             # END DEPRECATED CONFIGURATION BLOCK.
 
-        monitors = contents.pop('monitor', {})
+        monitors = dict(contents.pop('monitor', None) or {})    # Copy: entries are popped as they are started.
 
         # TODO: Deprecated configuration block. Remove block between 'begin' and 'end' in future release:
         # BEGIN DEPRECATED CONFIGURATION BLOCK.
-        for dep in [('cpu_interval', 'cpu_check_interval'), ('memory', 'memory_check_interval'),
-                    ('disk_usage', 'disk_check_interval')]:
-            deprecated_interval = contents.pop(dep[1], None)
-            if monitors.get(dep[0]) and deprecated_interval:
-                _log.warning(
-                    f"Ignoring deprecated configuration {dep[1]}, using provided monitor['{dep[0]}']['check_interval']"
-                    "See SysMonAgent/README.md for information on new configuration format.")
-
+        deprecated_disk_path = contents.pop('disk_path', '/')
+        for method, dep_key, point_name, params in [('cpu_percent', 'cpu_check_interval', 'CPU/Percent', {}),
+                                                    ('memory', 'memory_check_interval', 'Memory', {}),
+                                                    ('disk_usage', 'disk_check_interval', 'Disk/Usage',
+                                                     {'disk_path': deprecated_disk_path})]:
+            deprecated_interval = contents.pop(dep_key, None)
+            if monitors.get(method) and deprecated_interval:
+                _log.warning(f"Ignoring deprecated configuration {dep_key}, using provided"
+                             f" monitor['{method}']['check_interval']."
+                             " See SysMonAgent/README.md for information on new configuration format.")
             elif deprecated_interval:
-                monitors[dep[0]] = {'point_name': dep[0], 'check_interval': dep[1], 'poll': True}
-                _log.warning('Starting cpu_percent monitor using deprecated configuration "cpu_check_interval".'
-                             ' Update configuration to use monitor["cpu_percent"]["check_interval"].'
-                             'See SysMonAgent/README.md for information on new configuration format.')
+                monitors[method] = {'point_name': point_name, 'check_interval': deprecated_interval, 'poll': True,
+                                    'params': params}
+                _log.warning(f'Starting {method} monitor using deprecated configuration "{dep_key}".'
+                             f' Update configuration to use monitor["{method}"]["check_interval"].'
+                             ' See SysMonAgent/README.md for information on new configuration format.')
         # END DEPRECATED CONFIGURATION BLOCK.
 
         # Start Monitors:
         sleep(1)    # Wait for a second to pass to avoid divide by zero errors from tracking variables.
         for method in self.IMPLEMENTED_METHODS:
             item = monitors.pop(method, None)
-            if method == 'path_usage_rate' and item.get('path_name', None):
-                # Set initial value(s) of self.last_path_sizes for any configured path names.
-                self.path_usage_rate(item.get('path_name'))
-            if item and item.pop('poll', None) is True:
-                item_publish_type = item.get('publish_type', None)
-                item_publish_type = 'record' if method in self.RECORD_ONLY_PUBLISH_METHODS else item_publish_type
-                item_publish_type = item_publish_type if item_publish_type else self.default_publish_type
-                self._periodic_pub(getattr(self, method), item_publish_type, item['check_interval'], item['point_name'],
-                                   item['params'])
+            if not item:
+                continue
+            try:
+                self._start_monitor(method, item)
+            except Exception as e:
+                # A bad entry for one monitor should not prevent the others from running.
+                _log.error(f'Unable to start monitor "{method}": {e.__class__.__name__}: {e}')
 
         for key in contents:
             _log.warning('Ignoring unrecognized configuration parameter %s', key)
         for key in monitors:
             _log.warning(f'Ignoring unimplemented monitor method: {key}')
 
+    def _start_monitor(self, method, item):
+        """Schedule periodic publishes for one entry of the "monitor" configuration block."""
+        params = item.get('params') or {}
+        if method == 'path_usage_rate':
+            path_name = item.get('path_name') or params.get('path_name')
+            if path_name:
+                # Set initial value(s) of self.last_path_sizes for any configured path names.
+                self.path_usage_rate(path_name)
+        if item.get('poll') is not True:
+            return
+        check_interval = item['check_interval']
+        if not isinstance(check_interval, (int, float)) or check_interval <= 0:
+            raise ValueError(f'check_interval must be a positive number, not {check_interval!r}')
+        publish_type = item.get('publish_type') or self.default_publish_type
+        if method in self.RECORD_ONLY_PUBLISH_METHODS:
+            publish_type = 'record'
+        self._periodic_pub(getattr(self, method), publish_type, check_interval, item.get('point_name') or method,
+                           params)
+
     def _periodic_pub(self, func, publish_type, check_interval, point_name, params):
         """Periodically call func and publish its return value"""
 
         def _unpack(topic, item, now, entries=None):
-            data_type = type(item)
             entries = entries if entries else {}
-            if data_type in [int, float, str, bool, None]:
-                units = self.UNITS[func.__name__]
+            if isinstance(item, Enum):    # e.g. psutil.BatteryTime, psutil.NicDuplex
+                item = item.value if isinstance(item.value, (int, float, str)) else item.name
+            if item is None or isinstance(item, (int, float, str)):    # bool is a subclass of int.
+                units = self.UNITS.get(func.__name__)
                 topic = path.normpath(topic)
-                if type(units) == dict:
-                    units = units[topic.split('/')[-1]]
+                if isinstance(units, dict):
+                    units = units.get(topic.split('/')[-1])
                 entries[topic] = self.publish_data(item, units, type(item).__name__, now)
-            elif data_type is dict:
+            elif isinstance(item, dict):
                 for k, v in item.items():
                     entries = _unpack(topic + '/' + str(k), v, now, entries)
+            elif isinstance(item, (list, tuple)):
+                for k, v in enumerate(item):
+                    entries = _unpack(topic + '/' + str(k), v, now, entries)
             else:
-                _log.warning(f'Unexpected return type from method: {func.__name__}')
+                _log.warning(f'Unexpected return type {type(item).__name__} from method: {func.__name__}')
             return entries
 
         def _datalogger_publish(parameters):
@@ -249,14 +286,17 @@ class SysMonAgent(Agent):
             tz = now.tzname()
             now = utils.format_timestamp(now)
             entries = _unpack(point_name, data, now)
+            if not entries:
+                return
             point_base = path.dirname(path.commonprefix(list(entries.keys())))
             entries = {path.relpath(topic, point_base): value for topic, value in entries.items()}
             message = {}
             header = {'Date': now}
             for k, v in entries.items():
                 message[k] = {'Readings': [v.now, v.value], 'Units': v.units, 'tz': tz, 'data_type': v.data_type}
+            topic = '/'.join(filter(None, [publish_type, self.base_topic, point_base]))
             self.vip.pubsub.publish(peer='pubsub',
-                                    topic=publish_type + '/' + self.base_topic + '/' + point_base,
+                                    topic=topic,
                                     headers=header,
                                     message=message)
 
@@ -264,23 +304,26 @@ class SysMonAgent(Agent):
             data = func(**parameters)
             now = utils.format_timestamp(utils.get_aware_utc_now())
             entries = _unpack(point_name, data, now)
+            if not entries:
+                return
             point_base = path.dirname(path.commonprefix(list(entries.keys())))
             entries = {path.relpath(topic, point_base): value for topic, value in entries.items()}
             val, meta = {}, {}
             for k, v in entries.items():
-                val[k] = v
+                val[k] = v.value
                 meta[k] = {'Units': v.units, 'data_type': v.data_type}
             message = [val, meta]
             header = {'Date': now}
-            topic = publish_type + '/' + self.base_topic + '/' + point_base + '/all'
+            topic = '/'.join(filter(None, [publish_type, self.base_topic, point_base, 'all']))
             self.vip.pubsub.publish(peer='pubsub', topic=topic, headers=header, message=message)
 
         def _record_publish(parameters):
             data = func(**parameters)
             now = utils.format_timestamp(utils.get_aware_utc_now())
             header = {'Date': now}
+            topic = '/'.join(filter(None, [publish_type, self.base_topic, point_name]))
             self.vip.pubsub.publish(peer='pubsub',
-                                    topic=publish_type + '/' + self.base_topic + '/' + point_name,
+                                    topic=topic,
                                     headers=header,
                                     message=data)
 
@@ -305,8 +348,8 @@ class SysMonAgent(Agent):
 
     @RPC.export('cpu_times')
     def cpu_times(self, per_cpu=False, sub_points=None):
-        """Return percentage of time the CPU has spent in a given mode."""
-        times = psutil.cpu_times_percent(percpu=per_cpu)
+        """Return time (in seconds) the CPU has spent in a given mode."""
+        times = psutil.cpu_times(percpu=per_cpu)
         times = self._process_statistics(times, sub_points=sub_points)
         return times
 
@@ -328,6 +371,11 @@ class SysMonAgent(Agent):
         stats = psutil.cpu_stats()
         stats = self._process_statistics(stats, sub_points=sub_points)
         return stats
+
+    @RPC.export('cpu_statistics')
+    def cpu_statistics(self, sub_points=None):
+        """Return various CPU statistics."""
+        return self.cpu_stats(sub_points=sub_points)
 
     @RPC.export('cpu_frequency')
     def cpu_frequency(self, per_cpu=False, sub_points=None):
@@ -422,8 +470,8 @@ class SysMonAgent(Agent):
             if current_usage > 0:    # Don't use or store error codes as a usage value.
                 current_path_sizes[path_n] = {'value': current_usage, 'dt': now}
                 if path_n in self.last_path_sizes:
-                    rates[path_n] = (current_usage - self.last_path_sizes[path_n]['value']) \
-                                    / (now - self.last_path_sizes[path_n]['dt']).seconds
+                    dt = (now - self.last_path_sizes[path_n]['dt']).total_seconds()
+                    rates[path_n] = (current_usage - self.last_path_sizes[path_n]['value']) / dt if dt > 0 else 0.0
                 else:
                     rates[
                         path_n] = -2    # Error code -2 indicates no prior tracking data. Call again for valid response.
@@ -467,11 +515,11 @@ class SysMonAgent(Agent):
             if 'type' in v:
                 v['type'] = v['type'].name
             if 'laddr' in v:
-                v['laddr'] = v['laddr'].ip + ':' + str(v['laddr'].port) \
-                    if type(v['laddr']) is psutil._common.addr else ''
+                laddr = v['laddr']
+                v['laddr'] = f"{laddr.ip}:{laddr.port}" if hasattr(laddr, 'ip') and hasattr(laddr, 'port') else ''
             if 'raddr' in v:
-                v['raddr'] = v['raddr'].ip + ':' + str(v['raddr'].port) \
-                    if type(v['raddr']) is psutil._common.addr else ''
+                raddr = v['raddr']
+                v['raddr'] = f"{raddr.ip}:{raddr.port}" if hasattr(raddr, 'ip') and hasattr(raddr, 'port') else ''
         connections = self._format_return(connections)
         return connections
 
@@ -487,6 +535,11 @@ class SysMonAgent(Agent):
         addresses = self._format_return(addresses)
         return addresses
 
+    @RPC.export('network_interface_address')
+    def network_interface_address(self, included_interfaces=None, sub_points=None):
+        """Alias for network_interface_addresses."""
+        return self.network_interface_addresses(included_interfaces=included_interfaces, sub_points=sub_points)
+
     @RPC.export('network_interface_statistics')
     def network_interface_statistics(self, included_interfaces=None, sub_points=None):
         """Return information about each network interface."""
@@ -499,15 +552,16 @@ class SysMonAgent(Agent):
         return stats
 
     @RPC.export('sensors_temperatures')
-    def sensors_temperatures(self, fahrenheit=False):
+    def sensors_temperatures(self, fahrenheit=False, included_sensors=None, sub_points=None):
         """Return hardware temperatures."""
         temps = psutil.sensors_temperatures(fahrenheit=fahrenheit)
-        
         if not temps:
-            return "No hardware to read"
+            return {}
 
         formatted_temps = {}
         for sensor_type, readings in temps.items():
+            if included_sensors and sensor_type not in included_sensors:
+                continue
             formatted_readings = []
             for reading in readings:
                 # Use the sensor label if available, otherwise, use the sensor type as the label
@@ -516,14 +570,22 @@ class SysMonAgent(Agent):
                 unit = 'F' if fahrenheit else 'C'
                 current_temperature = f"{reading.current}°{unit}"
 
-                formatted_readings.append({
+                reading_dict = {
                     'label': label,
                     'current': current_temperature,
-                })
-            formatted_temps[sensor_type] = formatted_readings
+                    'high': reading.high,
+                    'critical': reading.critical,
+                }
+                if sub_points:
+                    if isinstance(sub_points, list):
+                        reading_dict = {k: v for k, v in reading_dict.items() if k in sub_points}
+                    elif isinstance(sub_points, dict):
+                        reading_dict = {k: v for k, v in reading_dict.items() if sub_points.get(k, False) is True}
+                formatted_readings.append(reading_dict)
+            if formatted_readings:
+                formatted_temps[sensor_type] = formatted_readings
 
         return formatted_temps
-
 
     @RPC.export('sensors_fans')
     def sensors_fans(self, sub_points=None, included_sensors=None):
@@ -600,10 +662,23 @@ class SysMonAgent(Agent):
         else:
             return {key: value for (key, value) in item._asdict().items()}
 
+    @staticmethod
+    def _sub_point_wanted(sub_points, name):
+        """Whether a sub_points filter (None, str, list or {name: bool}) selects the named sub point."""
+        if not sub_points:
+            return True
+        if isinstance(sub_points, dict):
+            return sub_points.get(name, False) is True
+        if isinstance(sub_points, str):
+            return name == sub_points
+        return name in sub_points
+
     # TODO: The tracking variables for this should us a look back buffer, not just last value as currently used.
     @staticmethod
     def _get_throughput(io_stats, retval, per_device, sub_points, in_ret_label, out_ret_label, in_label, out_label,
                         last_in, last_out):
+        if io_stats is None:    # psutil returns None when the system has no disks/NICs (e.g. some containers).
+            return
         now = utils.get_aware_utc_now()
         current_in_bytes = {}
         current_out_bytes = {}
@@ -617,10 +692,11 @@ class SysMonAgent(Agent):
 
         for device, in_bytes in current_in_bytes.items():
             if device in last_in:
-                throughput = (in_bytes['value'] - last_in[device]['value']) / (now - last_in[device]['dt']).seconds
+                elapsed = (now - last_in[device]['dt']).total_seconds()
+                throughput = (in_bytes['value'] - last_in[device]['value']) / elapsed if elapsed > 0 else 0.0
             else:
                 throughput = -2
-            if not sub_points or in_ret_label in sub_points:
+            if SysMonAgent._sub_point_wanted(sub_points, in_ret_label):
                 if not per_device:
                     retval[in_ret_label] = throughput
                 elif device in retval:
@@ -628,10 +704,11 @@ class SysMonAgent(Agent):
         last_in.update(current_in_bytes)
         for device, out_bytes in current_out_bytes.items():
             if device in last_out:
-                throughput = (out_bytes['value'] - last_out[device]['value']) / (now - last_out[device]['dt']).seconds
+                elapsed = (now - last_out[device]['dt']).total_seconds()
+                throughput = (out_bytes['value'] - last_out[device]['value']) / elapsed if elapsed > 0 else 0.0
             else:
                 throughput = -2
-            if not sub_points or out_ret_label in sub_points:
+            if SysMonAgent._sub_point_wanted(sub_points, out_ret_label):
                 if not per_device:
                     retval[out_ret_label] = throughput
                 elif device in retval:

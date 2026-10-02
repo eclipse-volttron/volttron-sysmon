@@ -24,16 +24,13 @@
 
 """Configuration for the pytest test suite."""
 
+import sys
+from pathlib import Path
 import pytest
 
-import sys
+from gevent import monkey
+if not monkey.is_module_patched("subprocess"):
+    monkey.patch_subprocess()
+
 if "src" not in sys.path:
     sys.path.insert(0, "src")
-
-from volttrontesting.fixtures.volttron_platform_fixtures import volttron_instance
-
-
-@pytest.fixture()
-def publish_agent(volttron_instance):
-    assert volttron_instance.is_running()
-    yield volttron_instance.build_agent(identity="publish_agent")
